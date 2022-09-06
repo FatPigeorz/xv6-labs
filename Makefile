@@ -193,6 +193,11 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_sleep\
+	$U/_pingpong\
+	$U/_primes\
+	$U/_find\
+	$U/_xargs\
 
 
 
@@ -306,6 +311,11 @@ qemu: $K/kernel fs.img
 
 qemu-gdb: $K/kernel .gdbinit fs.img
 	@echo "*** Now run 'gdb' in another window." 1>&2
+	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
+
+qemu-gdb-vsc: $K/kernel .gdbinit fs.img
+	@echo "*** Now run 'gdb' in another window." 1>&2
+	sed "/target/d" < .gdbinit.tmpl-riscv > .gdbinit
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 
 ifeq ($(LAB),net)
