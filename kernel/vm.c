@@ -174,8 +174,8 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+    // if((*pte & PTE_V) == 0)
+      // panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -303,7 +303,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  // char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -311,12 +311,16 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    *pte = (*pte & ~PTE_W) | PTE_C;
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    // if((mem = kalloc()) == 0)
+    //   goto err;
+    // memmove(mem, (char*)pa, PGSIZE);
+    acquire(&reflock);
+    refcnt[PGID(pa)]++;
+    release(&reflock);
+    if (mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      // kfree(mem);
       goto err;
     }
   }
@@ -350,9 +354,15 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
+    if (va0 >= MAXVA)
       return -1;
+    pte_t *pte = walk(pagetable, va0, 0);
+    if (pte == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_V) == 0)
+      return -1;
+    if ((*pte & PTE_W) == 0)
+      if (cowfault(pagetable, va0) < 0)
+        return -1;
+    pa0 = PTE2PA(*pte);
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -431,4 +441,27 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+cowfault(pagetable_t pagetable, uint64 va)
+{
+  if (va >= MAXVA)
+    return -1;
+  pte_t *pte = walk(pagetable, va, 0);
+  if ((*pte & PTE_U) == 0 || (*pte & PTE_V) == 0)
+    return -1;
+  if ((*pte & PTE_C) == 0) {
+    return -1;
+  }
+
+  uint64 pa0 = PTE2PA(*pte);
+  uint64 pa1;
+  if ((pa1 = (uint64)kalloc()) == 0) {
+    return -1;
+  }
+  memmove((void*)pa1, (void*)pa0, PGSIZE);
+  *pte = ((PTE_FLAGS(*pte) | PA2PTE(pa1)) & ~PTE_C) | PTE_W;
+  kfree((void*)pa0);
+  return 0;
 }
