@@ -12,6 +12,7 @@
 #include "file.h"
 #include "stat.h"
 #include "proc.h"
+#include "fcntl.h"
 
 struct devsw devsw[NDEV];
 struct {
@@ -180,3 +181,53 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+
+// mmap fault
+int
+mmapfault(pagetable_t pagetable, uint64 va) {
+  struct proc *p = myproc();
+  if (va > MAXVA)
+    return -1;
+  if (!p->vma_list)
+    return -2;
+  struct vma* pv = p->vma_list;
+  
+  // find mmaped area
+  while(pv) {
+    if (pv->addr <= va && va < pv->end) {
+      break;
+    }
+    pv = pv->next;
+  }
+  if(!pv)
+    return -3;
+    
+  // r/w valid?
+  if (pv->prot == PROT_NONE)
+    return -4;
+  if ((r_scause() == 13) && !(pv->prot&PROT_READ))
+    return -5;
+  if ((r_scause() == 15) && !(pv->prot&PROT_WRITE))
+    return -6;
+
+  // allocate a physical page
+  void* pa = kalloc();
+  if (!pa)
+    return -7;
+  memset(pa, 0, PGSIZE);
+  struct file* fp =  pv->fp;
+  
+  ilock(fp->ip);
+  readi(fp->ip, 0, (uint64)pa, va - pv->addr + pv->offset, PGSIZE);
+  iunlock(fp->ip);
+
+  int perm = PTE_U;
+  perm = pv->prot&PROT_READ ? (perm | PTE_R) : perm;
+  perm = pv->prot&PROT_WRITE ? (perm | PTE_W) : perm;
+  if (mappages(pagetable, va, PGSIZE, (uint64)pa, perm) < 0) {
+    kfree(pa);
+    return -8;
+  }
+
+  return 0;
+}

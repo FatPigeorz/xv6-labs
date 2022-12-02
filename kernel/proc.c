@@ -10,6 +10,8 @@ struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
 
+struct vma vmas[NVMA];
+
 struct proc *initproc;
 
 int nextpid = 1;
@@ -53,6 +55,14 @@ procinit(void)
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
       p->kstack = KSTACK((int) (p - proc));
+  }
+}
+
+// initialize the vma table at boot time
+void vmainit(void) {
+  struct vma *v;
+  for (v = vmas; v < &vmas[NVMA]; v++) {
+    initlock(&v->lock, "vma");
   }
 }
 
@@ -313,6 +323,43 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  np->vma_list = 0;
+  struct vma *parent_vma = p->vma_list;
+  struct vma *prev = 0;
+  while(parent_vma){
+    // alloc vma
+    struct vma *v = 0;
+    for (int i = 0; i < NVMA; i++) {
+      acquire(&vmas[i].lock);
+      if (!vmas[i].length) {
+        v = &vmas[i];
+        break;
+      }
+      release(&vmas[i].lock);
+    }
+    if (!v) {
+      panic("fork: no available vma\n");
+      return -1;
+    }
+    v->addr = parent_vma->addr;
+    v->length = parent_vma->length;
+    v->end = parent_vma->end;
+    v->offset = parent_vma->offset;
+    v->prot = parent_vma->prot;
+    v->flags = parent_vma->flags;
+    v->fp = parent_vma->fp;
+    filedup(v->fp);
+    v->next = 0;
+    if(!prev){
+      np->vma_list = v;
+    } else {
+      prev->next = v;
+    }
+    prev = v;
+    parent_vma = parent_vma->next;
+    release(&v->lock);
+  }
+
   release(&np->lock);
 
   return pid;
@@ -352,6 +399,25 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+
+  struct vma* v = p->vma_list, *tmp = v;
+  while(v){
+    fileclose(v->fp);
+    acquire(&v->lock);
+    printf("addr %p, offset %p\n", v->addr, v->offset);
+    uvmunmap(p->pagetable, v->addr + v->offset, PGROUNDUP(v->length) / PGSIZE, 1);
+    v->addr = 0;
+    v->end = 0;
+    v->length = 0;
+    v->prot = 0;
+    v->flags = 0;
+    v->fp = 0;
+    v->next = 0;
+    release(&v->lock);
+    v = tmp->next;
+    tmp = v;
+  }
+
 
   begin_op();
   iput(p->cwd);

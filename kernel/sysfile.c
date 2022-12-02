@@ -484,3 +484,179 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void) {
+  void *addr;
+  int length, prot, flags, fd, offset;
+  if (argaddr(0, (uint64*)&addr) < 0 || argint(1, &length) < 0 || argint(2, &prot) < 0 || argint(3, &flags) < 0 || argint(4, &fd) < 0 || argint(5, &offset) < 0) {
+    return -1;
+  }
+  // assume address and offset are zero
+  if(addr)
+    panic("mmap: nonzero address");
+  if(offset)
+    panic("mmap: nonzero offset");
+  
+  // zero length 
+  // panic("mmap: zero length");
+
+  struct proc *p = myproc();
+  struct file* fp = p->ofile[fd];
+  struct vma* v = 0;
+  
+  if (prot & PROT_WRITE) {
+    // unwritable file can be mmaped as MAP_PRIVATE
+    if(!fp->writable && !(flags & MAP_PRIVATE)) 
+      return -1;
+  }
+  if (prot & PROT_READ) {
+    if(!fp->readable) 
+      return -1;
+  }
+
+  // alloc vma
+  for (int i = 0; i < NVMA; i++) {
+    acquire(&vmas[i].lock);
+    if (!vmas[i].length) {
+      v = &vmas[i];
+      break;
+    }
+    release(&vmas[i].lock);
+  }
+  
+  if (!v) {
+    panic("mmap: no available vma\n");
+    return 0xffffffffffffffff;
+  }
+  
+  v->length = length;
+  v->prot = prot;
+  v->offset = offset;
+  v->flags = flags;
+  v->fp = fp;
+  filedup(fp);
+  
+  // find area
+  struct vma* prev = p->vma_list;
+  if (!prev) {
+    v->addr = VMABASE;
+    v->end = v->addr + length;
+    p->vma_list = v;
+  } else {
+    while(prev->next)
+      prev = prev->next;
+    v->addr = PGROUNDUP(prev->end);
+    v->end = v->addr + length;
+    prev->next = v;
+  }
+  release(&v->lock);
+  printf("mmap: [%p, %p)\n", v->addr, v->end);
+  return v->addr;
+}
+
+void
+writeback(struct vma* v, uint64 addr, int n)
+{
+  if( (v->flags & MAP_PRIVATE) || !(v->prot & PROT_WRITE)) // no need to writeback
+    return;
+
+  int r = 0;
+  struct file* f = v->fp;
+  // write a few blocks at a time to avoid exceeding
+  // the maximum log transaction size, including
+  // i-node, indirect block, allocation blocks,
+  // and 2 blocks of slop for non-aligned writes.
+  // this really belongs lower down, since writei()
+  // might be writing a device like the console.
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  int i = 0;
+  while(i < n){
+    int n1 = n - i;
+    if(n1 > max)
+      n1 = max;
+
+    begin_op();
+    ilock(f->ip);
+    if ((r = writei(f->ip, 1, addr + i, addr + i - v->addr, n1)) > 0)
+      f->off += r;
+    iunlock(f->ip);
+    end_op();
+
+    if(r != n1){
+      break;
+    }
+    i += r;
+  }
+}
+
+uint64
+sys_munmap(void) {
+  uint64 addr;
+  int length;
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0){
+    return -1;
+  }
+  // addr must be a multiple of the page size 
+  if(addr % PGSIZE)
+    return -1;
+  struct proc *p = myproc();
+  struct vma *prev = 0;
+  struct vma *v = p->vma_list;
+  while(v) {
+    if (v->addr + v->offset <= addr && addr < v->end)
+      break;
+    prev = v;
+    v = v->next;
+  }
+  // unmaped area
+  if(!v)
+    return -1;
+  if ((addr != v->addr) && (addr + length != v->end))
+    panic("unmap the middle");
+
+
+  for (int i = 0; i < length; i += PGSIZE) {
+    pte_t *pte = walk(p->pagetable, addr + i, 0);
+    if (pte && *pte & PTE_V) {
+      if (*pte & PTE_D)
+        writeback(v, addr + i, PGSIZE);
+      uvmunmap(p->pagetable, addr + i, 1, 1);
+    }
+  }
+
+  // assume that it will either unmap at the start, or at the end, or the whole region (but not punch a hole in the middle of a region).
+  if(addr == v->addr + v->offset && length == v->length) {
+    printf("unmap all [%p, %p)\n", addr, addr + length);
+    // removes all pages of a previous mmap
+    if(!prev)
+      p->vma_list = v->next;
+    else
+      prev->next = v->next;
+    fileclose(v->fp);
+    acquire(&v->lock);
+    v->addr = 0;
+    v->end = 0;
+    v->length = 0;
+    v->prot = 0;
+    v->flags = 0;
+    v->fp = 0;
+    v->next = 0;
+    release(&v->lock);
+  } else if (addr == v->addr + v->offset && length < v->length) {
+    printf("unmap head [%p, %p)\n", addr, addr + length);
+    acquire(&v->lock);
+    v->offset += length;
+    v->length -= length;
+    release(&v->lock);
+  } else if (addr + length == v->end) {
+    printf("unmap tail [%p, %p)\n", addr, addr + length);
+    acquire(&v->lock);
+    v->length -= length;
+    v->end -= length;
+    release(&v->lock);
+  } 
+
+
+  return 0;
+}

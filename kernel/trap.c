@@ -65,6 +65,14 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15) {
+    // page fault
+    // printf("pagefault, acess %p\n", r_stval());
+    int ret;
+    if ((ret = mmapfault(p->pagetable, r_stval())) < 0) {
+      p->killed = 1;
+      printf("mmapfault(%d)\n", ret);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
